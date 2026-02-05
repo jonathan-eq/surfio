@@ -1,5 +1,7 @@
 #include "include/irap.h"
 #include "include/irap_export.h"
+#include <charconv>
+#include <cstdio>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -7,12 +9,38 @@
 #include <iomanip>
 #include <ostream>
 #include <sstream>
+#include <string>
 
 namespace fs = std::filesystem;
 
 namespace surfio::irap {
 static const auto id = std::format("{} ", irap_header::id);
-static auto UNDEF_MAP_IRAP_STRING = std::format("{:f}", UNDEF_MAP_IRAP_ASCII);
+static const auto UNDEF_MAP_IRAP_STRING = std::format("{:.4f}", UNDEF_MAP_IRAP_ASCII);
+
+namespace {
+constexpr int ASCII_VALUE_PRECISION = 4;
+
+inline void append_fixed_4(std::string& line, float value) {
+  if (std::isnan(value)) {
+    line.append(UNDEF_MAP_IRAP_STRING);
+    return;
+  }
+
+  char buf[64];
+  auto [ptr, ec] =
+      std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::fixed, ASCII_VALUE_PRECISION);
+  if (ec == std::errc()) {
+    line.append(buf, ptr);
+    return;
+  }
+
+  // Very rare fallback.
+  auto len = std::snprintf(buf, sizeof(buf), "%.4f", static_cast<double>(value));
+  if (len > 0) {
+    line.append(buf, buf + len);
+  }
+}
+} // namespace
 
 void write_header_ascii(const irap_header& header, std::ostream& out) {
   out << std::setprecision(6) << std::fixed << std::showpoint;
@@ -23,10 +51,11 @@ void write_header_ascii(const irap_header& header, std::ostream& out) {
 }
 
 void write_values_ascii(surf_span values, std::ostream& out) {
-  out << std::setprecision(4) << std::fixed << std::showpoint;
-  size_t values_on_current_line = 0;
+  size_t remaining_on_current_line = MAX_PER_LINE;
   auto rows = values.extent(0);
   auto cols = values.extent(1);
+  std::string line;
+  line.reserve(MAX_PER_LINE * 16);
   for (size_t j = 0; j < cols; j++) {
     for (size_t i = 0; i < rows; i++) {
 #if __cpp_multidimensional_subscript
@@ -34,11 +63,21 @@ void write_values_ascii(surf_span values, std::ostream& out) {
 #else
       auto v = values(i, j);
 #endif
-      out << (std::isnan(v) ? UNDEF_MAP_IRAP_STRING : std::format("{:f}", v));
+  append_fixed_4(line, v);
 
-      ++values_on_current_line %= MAX_PER_LINE;
-      out << (values_on_current_line ? " " : "\n");
+      if (--remaining_on_current_line) {
+        line.push_back(' ');
+      } else {
+        line.push_back('\n');
+        out.write(line.data(), static_cast<std::streamsize>(line.size()));
+        line.clear();
+        remaining_on_current_line = MAX_PER_LINE;
+      }
     }
+  }
+
+  if (!line.empty()) {
+    out.write(line.data(), static_cast<std::streamsize>(line.size()));
   }
 }
 
